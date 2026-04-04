@@ -41,9 +41,9 @@ class OxfordIIITPetDataset(Dataset):
         self.root = root
         self.split = split
         self.images_dir = os.path.join(root, "images")
-        self.masks_dir = os.path.join(root, "annotations", "trimaps")
-        self.xmls_dir = os.path.join(root, "annotations", "xmls")
-        self.list_file = os.path.join(root, "annotations", "list.txt")
+        self.masks_dir  = os.path.join(root, "annotations", "trimaps")
+        self.xmls_dir   = os.path.join(root, "annotations", "xmls")
+        self.list_file  = os.path.join(root, "annotations", "list.txt")
 
         self.samples = []
         self._build_samples(seed)
@@ -60,27 +60,24 @@ class OxfordIIITPetDataset(Dataset):
                 if len(parts) < 2:
                     continue
                 img_name = parts[0]
-                class_id = int(parts[1]) - 1  # 0-indexed
+                class_id = int(parts[1]) - 1
 
-                img_path = os.path.join(self.images_dir, img_name + ".jpg")
-                mask_path = os.path.join(self.masks_dir, img_name + ".png")
+                img_path  = os.path.join(self.images_dir, img_name + ".jpg")
+                mask_path = os.path.join(self.masks_dir,  img_name + ".png")
                 if not os.path.exists(img_path) or not os.path.exists(mask_path):
                     continue
 
                 all_data.append({
-                    "img_path": img_path,
+                    "img_path":  img_path,
                     "mask_path": mask_path,
-                    "xml_path": os.path.join(self.xmls_dir, img_name + ".xml"),
-                    "class_id": class_id,
+                    "xml_path":  os.path.join(self.xmls_dir, img_name + ".xml"),
+                    "class_id":  class_id,
                 })
 
         rng = np.random.RandomState(seed)
         idx = rng.permutation(len(all_data))
         split_at = int(0.8 * len(all_data))
-        if self.split == "train":
-            chosen = [all_data[i] for i in idx[:split_at]]
-        else:
-            chosen = [all_data[i] for i in idx[split_at:]]
+        chosen = [all_data[i] for i in (idx[:split_at] if self.split == "train" else idx[split_at:])]
         self.samples = chosen
 
     def _parse_bbox_normalized(self, xml_path, img_w, img_h):
@@ -89,20 +86,16 @@ class OxfordIIITPetDataset(Dataset):
         try:
             tree = ET.parse(xml_path)
             root = tree.getroot()
-            obj = root.find("object")
+            obj  = root.find("object")
             if obj is None:
                 return [0.0, 0.0, 1.0, 1.0]
-            bb = obj.find("bndbox")
+            bb   = obj.find("bndbox")
             xmin = float(bb.find("xmin").text) / img_w
             ymin = float(bb.find("ymin").text) / img_h
             xmax = float(bb.find("xmax").text) / img_w
             ymax = float(bb.find("ymax").text) / img_h
-            return [
-                max(0.0, min(1.0, xmin)),
-                max(0.0, min(1.0, ymin)),
-                max(0.0, min(1.0, xmax)),
-                max(0.0, min(1.0, ymax)),
-            ]
+            return [max(0., min(1., xmin)), max(0., min(1., ymin)),
+                    max(0., min(1., xmax)), max(0., min(1., ymax))]
         except Exception:
             return [0.0, 0.0, 1.0, 1.0]
 
@@ -113,24 +106,24 @@ class OxfordIIITPetDataset(Dataset):
         s = self.samples[idx]
 
         image = np.array(Image.open(s["img_path"]).convert("RGB"))
-        mask = np.array(Image.open(s["mask_path"]).convert("L"))
-        h, w = image.shape[:2]
+        mask  = np.array(Image.open(s["mask_path"]).convert("L"))
+        h, w  = image.shape[:2]
 
         bbox_norm = self._parse_bbox_normalized(s["xml_path"], w, h)
 
         transformed = self.transform(
-            image=image,
-            mask=mask,
-            bboxes=[bbox_norm],
-            bbox_labels=[0],
+            image=image, mask=mask,
+            bboxes=[bbox_norm], bbox_labels=[0],
         )
 
         image_t = transformed["image"].float()
+
+        # Fix: ToTensorV2 may return mask as Tensor already
         mask_raw = transformed["mask"]
         if isinstance(mask_raw, torch.Tensor):
             mask_t = mask_raw.long()
         else:
-            mask_t = torch.from_numpy(mask_raw).long()
+            mask_t = torch.from_numpy(np.array(mask_raw)).long()
         mask_t = torch.clamp(mask_t - 1, 0, 2)
 
         if len(transformed["bboxes"]) > 0:
@@ -138,7 +131,7 @@ class OxfordIIITPetDataset(Dataset):
         else:
             x1, y1, x2, y2 = 0.0, 0.0, 1.0, 1.0
 
-        # Convert to pixel-space cx, cy, w, h (as required by localization model)
+        # Pixel-space cx, cy, w, h
         cx = ((x1 + x2) / 2.0) * IMAGE_SIZE
         cy = ((y1 + y2) / 2.0) * IMAGE_SIZE
         bw = (x2 - x1) * IMAGE_SIZE
@@ -148,6 +141,6 @@ class OxfordIIITPetDataset(Dataset):
         return {
             "image": image_t,
             "label": torch.tensor(s["class_id"], dtype=torch.long),
-            "bbox": bbox_t,       # pixel space [cx, cy, w, h]
-            "mask": mask_t,       # long [H, W] with values 0,1,2
+            "bbox":  bbox_t,
+            "mask":  mask_t,
         }
