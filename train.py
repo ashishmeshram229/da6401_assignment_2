@@ -147,7 +147,7 @@ def train_task1(args):
 
         start_epoch, best_f1 = load_ckpt_if_exists(model, periodic_path, device)
 
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=args.epochs,
@@ -271,9 +271,10 @@ def train_task2(args):
     mse_fn = nn.MSELoss()
     params  = [p for p in model.parameters() if p.requires_grad]
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
-    sch     = torch.optim.lr_scheduler.StepLR(
-        opt, step_size=10, gamma=0.5,
-        last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
+    # ADD this instead:
+    sch     = torch.optim.lr_scheduler.CosineAnnealingLR(
+    opt, T_max=args.epochs,
+    last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
         model.train()
@@ -370,7 +371,7 @@ def train_task3_strategy(args, strategy):
 
     start_epoch, best_dice = load_ckpt_if_exists(model, periodic_path, device)
 
-    ce_fn   = nn.CrossEntropyLoss()
+    ce_fn = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 2.0, 3.0]).to(device))
     dice_fn = DiceLoss(num_classes=SEG_CLASSES)
     params  = [p for p in model.parameters() if p.requires_grad]
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)

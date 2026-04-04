@@ -165,4 +165,8 @@ class MultiTaskPerceptionModel(nn.Module):
         seg_out = self.seg_head(d1)
 
         # Return tuple — autograder does: cls, bbox, seg = model(x)
-        return cls_out, bbox_out, seg_out
+        return {
+    "classification": cls_out,
+    "localization":   bbox_out,
+    "segmentation":   seg_out,
+}
