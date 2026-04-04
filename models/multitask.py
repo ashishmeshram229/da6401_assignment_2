@@ -9,9 +9,9 @@ from .layers import CustomDropout
 IMAGE_SIZE = 224
 
 # ── PASTE YOUR DRIVE IDs HERE AFTER TRAINING ──────────────────
-CLASSIFIER_DRIVE_ID = "PASTE_CLASSIFIER_PTH_DRIVE_ID_HERE"
-LOCALIZER_DRIVE_ID  = "PASTE_LOCALIZER_PTH_DRIVE_ID_HERE"
-UNET_DRIVE_ID       = "PASTE_UNET_PTH_DRIVE_ID_HERE"
+CLASSIFIER_DRIVE_ID = "1pn4IErQkPuX4lmBrCue0NcwPc3ku977A"
+LOCALIZER_DRIVE_ID  = "18gdAHixh8vC4dFBrxgvgJdF2lKFvSkHy"
+UNET_DRIVE_ID       = "1NmxWnreo4A4COrRYinSxVFa9tvNFuGmT"
 # ──────────────────────────────────────────────────────────────
 
 
