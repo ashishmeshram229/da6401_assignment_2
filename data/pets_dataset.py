@@ -67,11 +67,15 @@ class OxfordIIITPetDataset(Dataset):
                 if not os.path.exists(img_path) or not os.path.exists(mask_path):
                     continue
 
+                # Pre-cache bbox so __getitem__ never re-parses XML
+                xml_path = os.path.join(self.xmls_dir, img_name + ".xml")
+                cached_bbox = self._parse_bbox_from_xml(xml_path)
+
                 all_data.append({
-                    "img_path":  img_path,
-                    "mask_path": mask_path,
-                    "xml_path":  os.path.join(self.xmls_dir, img_name + ".xml"),
-                    "class_id":  class_id,
+                    "img_path":    img_path,
+                    "mask_path":   mask_path,
+                    "class_id":    class_id,
+                    "cached_bbox": cached_bbox,   # [xmin_n, ymin_n, xmax_n, ymax_n] normalized
                 })
 
         rng = np.random.RandomState(seed)
@@ -80,13 +84,17 @@ class OxfordIIITPetDataset(Dataset):
         chosen = [all_data[i] for i in (idx[:split_at] if self.split == "train" else idx[split_at:])]
         self.samples = chosen
 
-    def _parse_bbox_normalized(self, xml_path, img_w, img_h):
+    def _parse_bbox_from_xml(self, xml_path):
+        """Parse bbox from XML once at dataset build time. Returns normalized [x1,y1,x2,y2]."""
         if not os.path.exists(xml_path):
             return [0.0, 0.0, 1.0, 1.0]
         try:
             tree = ET.parse(xml_path)
             root = tree.getroot()
-            obj  = root.find("object")
+            size = root.find("size")
+            img_w = float(size.find("width").text)  if size is not None else 1.0
+            img_h = float(size.find("height").text) if size is not None else 1.0
+            obj   = root.find("object")
             if obj is None:
                 return [0.0, 0.0, 1.0, 1.0]
             bb   = obj.find("bndbox")
@@ -107,9 +115,9 @@ class OxfordIIITPetDataset(Dataset):
 
         image = np.array(Image.open(s["img_path"]).convert("RGB"))
         mask  = np.array(Image.open(s["mask_path"]).convert("L"))
-        h, w  = image.shape[:2]
 
-        bbox_norm = self._parse_bbox_normalized(s["xml_path"], w, h)
+        # Use pre-cached bbox (already normalized) — no XML I/O at runtime
+        bbox_norm = s["cached_bbox"]
 
         transformed = self.transform(
             image=image, mask=mask,
@@ -118,7 +126,6 @@ class OxfordIIITPetDataset(Dataset):
 
         image_t = transformed["image"].float()
 
-        # Fix: ToTensorV2 may return mask as Tensor already
         mask_raw = transformed["mask"]
         if isinstance(mask_raw, torch.Tensor):
             mask_t = mask_raw.long()
@@ -131,7 +138,6 @@ class OxfordIIITPetDataset(Dataset):
         else:
             x1, y1, x2, y2 = 0.0, 0.0, 1.0, 1.0
 
-        # Pixel-space cx, cy, w, h
         cx = ((x1 + x2) / 2.0) * IMAGE_SIZE
         cy = ((y1 + y2) / 2.0) * IMAGE_SIZE
         bw = (x2 - x1) * IMAGE_SIZE

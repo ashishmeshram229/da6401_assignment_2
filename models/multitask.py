@@ -76,7 +76,7 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Flatten(),
             nn.Linear(512 * 4 * 4, 1024),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
+            CustomDropout(p=0.5),   # Must match VGG11Localizer dropout (p=0.5) for weight loading
             nn.Linear(1024, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 4),
@@ -115,7 +115,19 @@ class MultiTaskPerceptionModel(nn.Module):
         if os.path.exists(loc_path):
             loc = VGG11Localizer()
             loc.load_state_dict(_load_state(loc_path, device))
-            self.reg_head.load_state_dict(loc.reg_head[1:].state_dict())
+            # loc.reg_head[0] = AdaptiveAvgPool2d  (no weights)
+            # loc.reg_head[1:] shares structure with self.reg_head
+            # Remap keys: "1.weight" -> "0.weight" etc. (shift index by -1 to skip pool)
+            src_sd = loc.reg_head.state_dict()   # keys like "2.weight", "2.bias", "5.weight" ...
+            dst_sd = {}
+            for k, v in src_sd.items():
+                parts = k.split(".")
+                old_idx = int(parts[0])
+                new_idx = old_idx - 1          # shift left by 1 (drop the pool at index 0)
+                dst_sd[".".join([str(new_idx)] + parts[1:])] = v
+            missing, unexpected = self.reg_head.load_state_dict(dst_sd, strict=False)
+            if missing:
+                print(f"  reg_head missing keys (expected for Flatten/ReLU/Sigmoid): {missing}")
             print("Loaded localizer weights.")
 
         if os.path.exists(unet_path):

@@ -173,6 +173,22 @@ def train_task1(args):
 
             scheduler.step()
 
+            # ── Section 2.1: log block2 activation distribution once per run ──
+            if epoch == 1:
+                model.eval()
+                with torch.no_grad():
+                    sample_batch = next(iter(val_loader))
+                    sample_imgs  = sample_batch["image"].to(device)[:8]
+                    _, feats = model.encoder(sample_imgs, return_features=True)
+                    act_vals = feats["block2"].cpu().numpy().flatten()
+                wandb.log({
+                    "activations/block2_hist": wandb.Histogram(act_vals),
+                    "activations/block2_mean": float(act_vals.mean()),
+                    "activations/block2_std":  float(act_vals.std()),
+                })
+                model.train()
+            # ─────────────────────────────────────────────────────────────────
+
             model.eval()
             val_loss = 0.0
             val_preds, val_labels = [], []
@@ -556,7 +572,7 @@ def parse_args():
     p.add_argument("--batch_size",  type=int,   default=32)
     p.add_argument("--epochs",      type=int,   default=30)
     p.add_argument("--lr",          type=float, default=1e-4)
-    p.add_argument("--num_workers", type=int,   default=2)
+    p.add_argument("--num_workers", type=int,   default=4)
     p.add_argument("--task", type=str, default="all",
                    choices=["all", "task1", "task2", "task3", "report"])
     return p.parse_args()
