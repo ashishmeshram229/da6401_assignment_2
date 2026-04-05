@@ -116,10 +116,16 @@ def train_task1(args):
     train_loader, val_loader = get_loaders(args.data_root, args.batch_size, args.num_workers)
 
     runs = [
-        {"dropout_p": 0.5, "use_bn": True,  "run_name": "task1_bn_dp0.5"},
-        {"dropout_p": 0.5, "use_bn": False, "run_name": "task1_no_bn_dp0.5"},
-        {"dropout_p": 0.0, "use_bn": True,  "run_name": "task1_bn_no_dropout"},
-        {"dropout_p": 0.2, "use_bn": True,  "run_name": "task1_bn_dp0.2"},
+        # Best config trains for full epochs — this becomes classifier.pth
+        {"dropout_p": 0.5, "use_bn": True,  "run_name": "task1_bn_dp0.5",
+         "epochs_override": args.epochs},
+        # Ablation configs: 15 epochs each — enough for W&B report comparison
+        {"dropout_p": 0.5, "use_bn": False, "run_name": "task1_no_bn_dp0.5",
+         "epochs_override": 15},
+        {"dropout_p": 0.0, "use_bn": True,  "run_name": "task1_bn_no_dropout",
+         "epochs_override": 15},
+        {"dropout_p": 0.2, "use_bn": True,  "run_name": "task1_bn_dp0.2",
+         "epochs_override": 15},
     ]
 
     best_overall_f1, best_overall_ckpt = 0.0, None
@@ -129,9 +135,10 @@ def train_task1(args):
         ckpt_path     = os.path.join(args.ckpt_dir, f"{cfg['run_name']}.pth")
         periodic_path = os.path.join(args.ckpt_dir, f"{cfg['run_name']}_periodic.pth")
 
+        run_epochs = cfg.get("epochs_override", args.epochs)
         wandb.init(project=WANDB_PROJECT, group="task1_classification",
                    name=cfg["run_name"], reinit="finish_previous",
-                   config={**cfg, "lr": args.lr, "epochs": args.epochs})
+                   config={**cfg, "lr": args.lr, "epochs": run_epochs})
 
         model = VGG11Classifier(num_classes=NUM_CLASSES,
                                 dropout_p=cfg["dropout_p"]).to(device)
@@ -150,16 +157,16 @@ def train_task1(args):
         criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.epochs,
+            optimizer, T_max=run_epochs,
             last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
 
-        for epoch in range(start_epoch + 1, args.epochs + 1):
+        for epoch in range(start_epoch + 1, run_epochs + 1):
             model.train()
             tr_loss = 0.0
             tr_preds, tr_labels = [], []
 
             for batch in tqdm(train_loader,
-                              desc=f"e{epoch}/{args.epochs}", leave=False):
+                              desc=f"e{epoch}/{run_epochs}", leave=False):
                 imgs = batch["image"].to(device)
                 lbls = batch["label"].to(device)
                 optimizer.zero_grad()
@@ -211,7 +218,7 @@ def train_task1(args):
                        "train/f1":   tr_f1,
                        "val/loss":   val_loss / n_val,
                        "val/f1":     val_f1})
-            print(f"  e{epoch:02d} | train_f1={tr_f1:.4f}  "
+            print(f"  e{epoch:02d}/{run_epochs} | train_f1={tr_f1:.4f}  "
                   f"val_f1={val_f1:.4f}  val_loss={val_loss/n_val:.4f}")
 
             if val_f1 > best_f1:
@@ -267,16 +274,33 @@ def train_task2(args):
 
     start_epoch, best_iou = load_ckpt_if_exists(model, periodic_path, device)
 
-    iou_fn = IoULoss(reduction="mean")
-    mse_fn = nn.MSELoss()
+    iou_fn  = IoULoss(reduction="mean")
+    huber_fn = nn.SmoothL1Loss()          # more robust than MSE for bbox regression
     params  = [p for p in model.parameters() if p.requires_grad]
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
-    # ADD this instead:
     sch     = torch.optim.lr_scheduler.CosineAnnealingLR(
-    opt, T_max=args.epochs,
-    last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
+        opt, T_max=args.epochs,
+        last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
+        # Gradually unfreeze encoder: after epoch 10 unfreeze block3,
+        # after epoch 20 unfreeze block4+block5 for fine-tuning
+        if epoch == 11:
+            for p in model.encoder.block3.parameters():
+                p.requires_grad = True
+            opt.add_param_group({"params": model.encoder.block3.parameters(),
+                                 "lr": args.lr * 0.1})
+            print("  Unfroze encoder block3")
+        if epoch == 21:
+            for p in (list(model.encoder.block4.parameters()) +
+                      list(model.encoder.block5.parameters())):
+                p.requires_grad = True
+            opt.add_param_group({"params":
+                list(model.encoder.block4.parameters()) +
+                list(model.encoder.block5.parameters()),
+                "lr": args.lr * 0.01})
+            print("  Unfroze encoder block4+5")
+
         model.train()
         tr_loss, tr_ious = 0.0, []
         for batch in tqdm(train_loader,
@@ -285,7 +309,7 @@ def train_task2(args):
             bboxes = batch["bbox"].to(device)
             opt.zero_grad()
             pred = model(imgs)
-            loss = mse_fn(pred, bboxes) + iou_fn(pred, bboxes)
+            loss = huber_fn(pred, bboxes) + 2.0 * iou_fn(pred, bboxes)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -303,8 +327,8 @@ def train_task2(args):
                 imgs   = batch["image"].to(device)
                 bboxes = batch["bbox"].to(device)
                 pred   = model(imgs)
-                val_loss += (mse_fn(pred, bboxes) +
-                             iou_fn(pred, bboxes)).item() * imgs.size(0)
+                val_loss += (huber_fn(pred, bboxes) +
+                             2.0 * iou_fn(pred, bboxes)).item() * imgs.size(0)
                 val_ious.extend(compute_iou_np(
                     pred.cpu().numpy(), bboxes.cpu().numpy()).tolist())
 
@@ -371,7 +395,9 @@ def train_task3_strategy(args, strategy):
 
     start_epoch, best_dice = load_ckpt_if_exists(model, periodic_path, device)
 
-    ce_fn = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 2.0, 3.0]).to(device))
+    # Upweight foreground(1) and boundary(2) — background(0) is majority class
+    seg_weights = torch.tensor([0.5, 1.5, 2.0]).to(device)
+    ce_fn   = nn.CrossEntropyLoss(weight=seg_weights)
     dice_fn = DiceLoss(num_classes=SEG_CLASSES)
     params  = [p for p in model.parameters() if p.requires_grad]
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
@@ -466,6 +492,7 @@ def run_report(args):
     mean = np.array([0.485, 0.456, 0.406])
     std  = np.array([0.229, 0.224, 0.225])
 
+    # ── Section 2.4: Feature Maps ────────────────────────────────────────────
     clf_path = os.path.join(args.ckpt_dir, "classifier.pth")
     if os.path.exists(clf_path):
         wandb.init(project=WANDB_PROJECT, group="report_section_24",
@@ -492,15 +519,23 @@ def run_report(args):
                 axes[i].axis("off")
             fig.suptitle(title); plt.tight_layout(); return fig
 
+        # also show original image for context
+        orig_np = (batch["image"][0].numpy().transpose(1,2,0) * std + mean).clip(0,1)
+        fig_orig, ax_orig = plt.subplots(figsize=(3,3))
+        ax_orig.imshow(orig_np); ax_orig.axis("off")
+        ax_orig.set_title("Input image"); plt.tight_layout()
+
         wandb.log({
-            "section2_4/first_conv": wandb.Image(
-                plot_fmaps(acts[0], "First Conv - edges")),
-            "section2_4/last_conv":  wandb.Image(
-                plot_fmaps(feats["block5"], "Last Conv - semantics")),
+            "section2_4/input_image":  wandb.Image(fig_orig),
+            "section2_4/first_conv":   wandb.Image(
+                plot_fmaps(acts[0],          "Layer 1 – edge detectors (64 filters)")),
+            "section2_4/last_conv":    wandb.Image(
+                plot_fmaps(feats["block5"],  "Block 5 – high-level semantics (512 filters)")),
         })
         plt.close("all"); wandb.finish()
         print("Section 2.4 done.")
 
+    # ── Section 2.5: Detection Table ─────────────────────────────────────────
     loc_path = os.path.join(args.ckpt_dir, "localizer.pth")
     if os.path.exists(loc_path):
         wandb.init(project=WANDB_PROJECT, group="report_section_25",
@@ -508,32 +543,38 @@ def run_report(args):
         model = VGG11Localizer().to(device)
         model.load_state_dict(torch.load(loc_path, map_location=device)["state_dict"])
         model.eval()
-        table = wandb.Table(columns=["image", "iou", "confidence_proxy"])
+        table = wandb.Table(columns=["image", "iou", "confidence_score", "verdict"])
         count = 0
         for batch in val_loader:
             if count >= 10: break
             imgs = batch["image"].to(device)
             gt   = batch["bbox"][0].numpy()
             with torch.no_grad():
-                pred = model(imgs)[0].cpu().numpy()
+                raw  = model.reg_head(model.reg_pool(model.encoder(imgs))) # [0,1] before *IMAGE_SIZE
+                pred = (raw * IMAGE_SIZE)[0].cpu().numpy()
+                # Confidence proxy: mean sigmoid output value (how "committed" the network is)
+                conf = float(raw.mean().cpu())
             iou    = compute_iou_np(pred[None], gt[None])[0]
+            verdict = "✅ Good" if iou >= 0.5 else ("⚠️ Miss" if iou >= 0.2 else "❌ Fail")
             img_np = (batch["image"][0].numpy().transpose(1,2,0)
                       * std + mean).clip(0, 1)
             fig, ax = plt.subplots(figsize=(4, 4)); ax.imshow(img_np)
-            for box, color, lbl in [(gt,"green","GT"),
-                                     (pred,"red",f"IoU={iou:.2f}")]:
+            for box, color, lbl in [(gt, "green", "GT"),
+                                     (pred, "red", f"Pred IoU={iou:.2f}")]:
                 cx, cy, bw, bh = box
                 ax.add_patch(patches.Rectangle(
                     (cx-bw/2, cy-bh/2), bw, bh, lw=2, ec=color, fc="none"))
-                ax.text(cx-bw/2, cy-bh/2-3, lbl, color=color, fontsize=7,
-                        bbox=dict(fc="white", alpha=0.5, pad=1))
-            ax.axis("off"); plt.tight_layout()
-            table.add_data(wandb.Image(fig),
-                           round(float(iou),4), round(float(iou),4))
+                ax.text(cx-bw/2, cy-bh/2-5, lbl, color=color, fontsize=7,
+                        bbox=dict(fc="white", alpha=0.6, pad=1))
+            ax.axis("off"); ax.set_title(f"Conf={conf:.3f}  IoU={iou:.3f}", fontsize=8)
+            plt.tight_layout()
+            table.add_data(wandb.Image(fig), round(float(iou), 4),
+                           round(conf, 4), verdict)
             plt.close(fig); count += 1
         wandb.log({"section2_5/detection_table": table})
         wandb.finish(); print("Section 2.5 done.")
 
+    # ── Section 2.6: Segmentation Samples ────────────────────────────────────
     unet_path = os.path.join(args.ckpt_dir, "unet.pth")
     if os.path.exists(unet_path):
         wandb.init(project=WANDB_PROJECT, group="report_section_26",
@@ -547,19 +588,109 @@ def run_report(args):
             imgs      = batch["image"].to(device)
             gt_mask   = batch["mask"][0].numpy()
             with torch.no_grad():
-                pred_mask = model(imgs).argmax(1)[0].cpu().numpy()
-            img_np = (batch["image"][0].numpy().transpose(1,2,0)
-                      * std + mean).clip(0, 1)
+                logits    = model(imgs)
+                pred_mask = logits.argmax(1)[0].cpu().numpy()
+            img_np  = (batch["image"][0].numpy().transpose(1,2,0)
+                       * std + mean).clip(0, 1)
+            p_acc   = float((pred_mask == gt_mask).mean())
+            d_score = dice_score(
+                torch.from_numpy(pred_mask), torch.from_numpy(gt_mask))
             fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-            axes[0].imshow(img_np);  axes[0].set_title("Original");  axes[0].axis("off")
+            axes[0].imshow(img_np);
+            axes[0].set_title("Original Image"); axes[0].axis("off")
             axes[1].imshow(gt_mask,   cmap="tab10", vmin=0, vmax=2)
-            axes[1].set_title("GT Mask");   axes[1].axis("off")
+            axes[1].set_title("Ground Truth Trimap"); axes[1].axis("off")
             axes[2].imshow(pred_mask, cmap="tab10", vmin=0, vmax=2)
-            axes[2].set_title("Predicted"); axes[2].axis("off")
+            axes[2].set_title(f"Prediction  Dice={d_score:.3f}  PixAcc={p_acc:.3f}")
+            axes[2].axis("off")
             plt.tight_layout()
             wandb.log({f"section2_6/sample_{count}": wandb.Image(fig)})
             plt.close(fig); count += 1
         wandb.finish(); print("Section 2.6 done.")
+
+    # ── Section 2.7: Wild Images ─────────────────────────────────────────────
+    # Place any 3 pet .jpg images in  wild_images/  folder before running report
+    wild_dir = os.path.join(os.path.dirname(args.data_root), "wild_images")
+    if os.path.isdir(wild_dir):
+        from models.multitask import MultiTaskPerceptionModel
+        wandb.init(project=WANDB_PROJECT, group="report_section_27",
+                   name="wild_images", reinit="finish_previous")
+        mt = MultiTaskPerceptionModel(
+            classifier_path=os.path.join(args.ckpt_dir, "classifier.pth"),
+            localizer_path=os.path.join(args.ckpt_dir, "localizer.pth"),
+            unet_path=os.path.join(args.ckpt_dir, "unet.pth"),
+        ).to(device)
+        mt.eval()
+
+        import albumentations as A
+        from albumentations.pytorch import ToTensorV2
+        infer_tf = A.Compose([
+            A.Resize(IMAGE_SIZE, IMAGE_SIZE),
+            A.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225)),
+            ToTensorV2(),
+        ])
+
+        CLASSES = [
+            "Abyssinian","Bengal","Birman","Bombay","British Shorthair",
+            "Egyptian Mau","Maine Coon","Persian","Ragdoll","Russian Blue",
+            "Siamese","Sphynx","american bulldog","american pit bull terrier",
+            "basset hound","beagle","boxer","chihuahua","english cocker spaniel",
+            "english setter","german shorthaired","great pyrenees","havanese",
+            "japanese chin","keeshond","leonberger","miniature pinscher",
+            "newfoundland","pomeranian","pug","saint bernard","samoyed",
+            "scottish terrier","shiba inu","staffordshire bull terrier",
+            "wheaten terrier","yorkshire terrier",
+        ]
+
+        wild_imgs = sorted([
+            os.path.join(wild_dir, f) for f in os.listdir(wild_dir)
+            if f.lower().endswith((".jpg",".jpeg",".png"))
+        ])[:3]
+
+        if not wild_imgs:
+            print("  No wild images found in wild_images/ — skipping Section 2.7")
+        else:
+            for i, img_path in enumerate(wild_imgs):
+                img_np_orig = np.array(Image.open(img_path).convert("RGB"))
+                t = infer_tf(image=img_np_orig)["image"].float().unsqueeze(0).to(device)
+                with torch.no_grad():
+                    _out = mt(t)
+                    cls_out, bbox_out, seg_out = _out["classification"], _out["localization"], _out["segmentation"]
+                pred_cls  = int(cls_out.argmax(1).item())
+                breed     = CLASSES[pred_cls] if pred_cls < len(CLASSES) else str(pred_cls)
+                confidence= float(torch.softmax(cls_out, dim=1).max().item())
+                box       = bbox_out[0].cpu().numpy()   # cx,cy,w,h in pixels
+                seg_mask  = seg_out.argmax(1)[0].cpu().numpy()
+
+                img_vis = (infer_tf(image=img_np_orig)["image"]
+                           .numpy().transpose(1,2,0) * std + mean).clip(0,1)
+
+                fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                # Panel 1: image + bbox
+                axes[0].imshow(img_vis)
+                cx,cy,bw,bh = box
+                rect = patches.Rectangle((cx-bw/2, cy-bh/2), bw, bh,
+                                         lw=2, ec="red", fc="none")
+                axes[0].add_patch(rect)
+                axes[0].set_title(f"Breed: {breed}\nConf: {confidence:.2%}", fontsize=9)
+                axes[0].axis("off")
+                # Panel 2: original
+                axes[1].imshow(img_vis); axes[1].axis("off")
+                axes[1].set_title("Original", fontsize=9)
+                # Panel 3: segmentation
+                axes[2].imshow(seg_mask, cmap="tab10", vmin=0, vmax=2)
+                axes[2].axis("off")
+                axes[2].set_title("Segmentation Mask", fontsize=9)
+                plt.suptitle(f"Wild Image {i+1}: {os.path.basename(img_path)}")
+                plt.tight_layout()
+                wandb.log({f"section2_7/wild_{i+1}": wandb.Image(fig)})
+                plt.close(fig)
+                print(f"  Wild {i+1}: {breed}  conf={confidence:.2%}")
+        wandb.finish(); print("Section 2.7 done.")
+    else:
+        print(f"Skipping Section 2.7 – create folder '{wild_dir}' with 3 pet images.")
+
+    print("\nReport generation complete.")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -575,7 +706,7 @@ def parse_args():
     p.add_argument("--lr",          type=float, default=1e-4)
     p.add_argument("--num_workers", type=int,   default=4)
     p.add_argument("--task", type=str, default="all",
-                   choices=["all", "task1", "task2", "task3", "report"])
+                   choices=["all", "task1", "task2", "task3", "report", "report27"])
     return p.parse_args()
 
 
@@ -584,9 +715,15 @@ if __name__ == "__main__":
     os.makedirs(args.ckpt_dir, exist_ok=True)
     print(f"Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
-    if args.task in ("all", "task1"):  train_task1(args)
-    if args.task in ("all", "task2"):  train_task2(args)
-    if args.task in ("all", "task3"):  train_task3(args)
-    if args.task in ("all", "report"): run_report(args)
+    if args.task in ("all", "task1"):   train_task1(args)
+    if args.task in ("all", "task2"):   train_task2(args)
+    if args.task in ("all", "task3"):   train_task3(args)
+    if args.task in ("all", "report"):  run_report(args)
+    if args.task == "report27":
+        # Re-run only Section 2.7 wild-image inference.
+        # Usage:
+        #   1. mkdir wild_images && cp your_pet1.jpg your_pet2.jpg your_pet3.jpg wild_images/
+        #   2. python train.py --task report27
+        run_report(args)   # run_report is idempotent – skips sections whose ckpts don't exist
 
     print("\nDone. Checkpoints: classifier.pth  localizer.pth  unet.pth")

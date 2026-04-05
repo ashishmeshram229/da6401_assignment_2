@@ -13,17 +13,17 @@ class VGG11Localizer(nn.Module):
 
         self.encoder = VGG11Encoder(in_channels=in_channels)
 
-        # AdaptiveAvgPool to fixed size, then flatten, then FC
+        # AdaptiveAvgPool to 7x7 (more spatial info than 4x4)
         self.reg_head = nn.Sequential(
-            nn.AdaptiveAvgPool2d((4, 4)),
-            nn.Flatten(),                        # (B, 512*4*4) = (B, 8192)
-            nn.Linear(512 * 4 * 4, 1024),
+            nn.AdaptiveAvgPool2d((7, 7)),
+            nn.Flatten(),                        # (B, 512*7*7) = (B, 25088)
+            nn.Linear(512 * 7 * 7, 1024),
             nn.ReLU(inplace=True),
-            CustomDropout(p=dropout_p),
+            CustomDropout(p=0.3),               # lighter dropout for regression
             nn.Linear(1024, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 4),
-            nn.Sigmoid(),                        # output in [0, 1]
+            nn.ReLU(),                          # keep outputs >= 0, no sigmoid saturation
         )
 
         for m in self.reg_head.modules():
@@ -33,5 +33,6 @@ class VGG11Localizer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         f5 = self.encoder(x, return_features=False)
-        # sigmoid output [0,1] scaled to pixel space [0, IMAGE_SIZE]
-        return self.reg_head(f5) * IMAGE_SIZE
+        # ReLU keeps values >= 0; clamp to valid pixel range at output
+        out = self.reg_head(f5)
+        return out.clamp(0, IMAGE_SIZE)

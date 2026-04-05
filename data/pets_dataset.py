@@ -19,13 +19,17 @@ def get_transforms(split):
             [
                 A.Resize(IMAGE_SIZE, IMAGE_SIZE),
                 A.HorizontalFlip(p=0.5),
-                A.RandomRotate90(p=0.3),
-                A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=15, p=0.4),
-                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05, p=0.4),
+                A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1,
+                                   rotate_limit=15, p=0.5),
+                A.ColorJitter(brightness=0.3, contrast=0.3,
+                              saturation=0.3, hue=0.05, p=0.5),
+                A.CoarseDropout(max_holes=4, max_height=32,
+                                max_width=32, p=0.3),
                 A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
                 ToTensorV2(),
             ],
-            bbox_params=A.BboxParams(format="albumentations", label_fields=["bbox_labels"]),
+            bbox_params=A.BboxParams(format="albumentations", label_fields=["bbox_labels"],
+                              clip=True, min_visibility=0.3),
         )
     else:
         return A.Compose(
@@ -34,7 +38,8 @@ def get_transforms(split):
                 A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
                 ToTensorV2(),
             ],
-            bbox_params=A.BboxParams(format="albumentations", label_fields=["bbox_labels"]),
+            bbox_params=A.BboxParams(format="albumentations", label_fields=["bbox_labels"],
+                              clip=True, min_visibility=0.3),
         )
 
 

@@ -9,9 +9,9 @@ from .layers import CustomDropout
 IMAGE_SIZE = 224
 
 # ── PASTE YOUR DRIVE IDs HERE AFTER TRAINING ──────────────────
-CLASSIFIER_DRIVE_ID = "1pn4IErQkPuX4lmBrCue0NcwPc3ku977A"
-LOCALIZER_DRIVE_ID  = "18gdAHixh8vC4dFBrxgvgJdF2lKFvSkHy"
-UNET_DRIVE_ID       = "1NmxWnreo4A4COrRYinSxVFa9tvNFuGmT"
+CLASSIFIER_DRIVE_ID = "PASTE_CLASSIFIER_PTH_DRIVE_ID_HERE"
+LOCALIZER_DRIVE_ID  = "PASTE_LOCALIZER_PTH_DRIVE_ID_HERE"
+UNET_DRIVE_ID       = "PASTE_UNET_PTH_DRIVE_ID_HERE"
 # ──────────────────────────────────────────────────────────────
 
 
@@ -70,17 +70,17 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(4096, num_breeds),
         )
 
-        # ── Localization head ──
-        self.reg_pool = nn.AdaptiveAvgPool2d((4, 4))
+        # ── Localization head ── (must mirror VGG11Localizer exactly)
+        self.reg_pool = nn.AdaptiveAvgPool2d((7, 7))
         self.reg_head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(512 * 4 * 4, 1024),
+            nn.Linear(512 * 7 * 7, 1024),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.5),   # Must match VGG11Localizer dropout (p=0.5) for weight loading
+            CustomDropout(p=0.3),
             nn.Linear(1024, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 4),
-            nn.Sigmoid(),
+            nn.ReLU(),
         )
 
         # ── Segmentation decoder ──
@@ -153,7 +153,7 @@ class MultiTaskPerceptionModel(nn.Module):
         cls_out = self.cls_head(torch.flatten(self.avgpool(e5), 1))
 
         # Localization — flatten before FC, scale to pixel space
-        bbox_out = self.reg_head(self.reg_pool(e5)) * IMAGE_SIZE
+        bbox_out = self.reg_head(self.reg_pool(e5)).clamp(0, IMAGE_SIZE)
 
         # Segmentation
         d5 = self.dec5(self._pad_cat(self.up5(e5), e4))
@@ -164,9 +164,9 @@ class MultiTaskPerceptionModel(nn.Module):
         d1 = self.dec1(self.up1(d2))
         seg_out = self.seg_head(d1)
 
-        # Return tuple — autograder does: cls, bbox, seg = model(x)
+        # Return dict — autograder expects keys: classification, localization, segmentation
         return {
-    "classification": cls_out,
-    "localization":   bbox_out,
-    "segmentation":   seg_out,
-}
+            "classification": cls_out,   # (B, 37)
+            "localization":   bbox_out,  # (B, 4) [cx, cy, w, h] pixel space
+            "segmentation":   seg_out,   # (B, 3, H, W)
+        }
