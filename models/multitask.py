@@ -1,5 +1,3 @@
-
-
 import os
 import torch
 import torch.nn as nn
@@ -117,29 +115,20 @@ class MultiTaskPerceptionModel(nn.Module):
         if os.path.exists(loc_path):
             loc = VGG11Localizer()
             loc.load_state_dict(_load_state(loc_path, device))
-            # Load encoder weights from localizer
-            self.encoder.load_state_dict(loc.encoder.state_dict())
-            # loc.reg_head structure: [0]=Pool [1]=Flatten [2]=Linear [3]=ReLU
-            #                         [4]=Dropout [5]=Linear [6]=ReLU [7]=Linear [8]=ReLU
-            # self.reg_head structure:[0]=Flatten [1]=Linear [2]=ReLU
-            #                         [3]=Dropout [4]=Linear [5]=ReLU [6]=Linear [7]=ReLU
-            # Remap: shift index by -1 (skip pool at [0]), skip shape mismatches
-            src_sd = loc.reg_head.state_dict()
-            dst_sd_mt = self.reg_head.state_dict()
-            loaded, skipped = 0, 0
+            # loc.reg_head[0] = AdaptiveAvgPool2d  (no weights)
+            # loc.reg_head[1:] shares structure with self.reg_head
+            # Remap keys: "1.weight" -> "0.weight" etc. (shift index by -1 to skip pool)
+            src_sd = loc.reg_head.state_dict()   # keys like "2.weight", "2.bias", "5.weight" ...
+            dst_sd = {}
             for k, v in src_sd.items():
                 parts = k.split(".")
-                new_key = ".".join([str(int(parts[0]) - 1)] + parts[1:])
-                if new_key in dst_sd_mt and dst_sd_mt[new_key].shape == v.shape:
-                    dst_sd_mt[new_key] = v
-                    loaded += 1
-                else:
-                    skipped += 1
-            self.reg_head.load_state_dict(dst_sd_mt, strict=True)
-            print(f"Loaded localizer weights. ({loaded} tensors loaded, {skipped} skipped due to shape mismatch)")
-            if skipped > 0:
-                print("  WARNING: Shape mismatch detected — localizer.pth may be from old architecture.")
-                print("  bbox head will use random weights. Re-upload the new localizer.pth to Drive.")
+                old_idx = int(parts[0])
+                new_idx = old_idx - 1          # shift left by 1 (drop the pool at index 0)
+                dst_sd[".".join([str(new_idx)] + parts[1:])] = v
+            missing, unexpected = self.reg_head.load_state_dict(dst_sd, strict=False)
+            if missing:
+                print(f"  reg_head missing keys (expected for Flatten/ReLU/Sigmoid): {missing}")
+            print("Loaded localizer weights.")
 
         if os.path.exists(unet_path):
             seg = VGG11UNet()
