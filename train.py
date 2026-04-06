@@ -292,14 +292,17 @@ def train_task2(args):
                                  "lr": args.lr * 0.1})
             print("  Unfroze encoder block3")
         if epoch == 21:
-            for p in (list(model.encoder.block4.parameters()) +
-                      list(model.encoder.block5.parameters())):
-                p.requires_grad = True
-            opt.add_param_group({"params":
+            # Collect only params not already in any optimizer group
+            existing = {id(p) for group in opt.param_groups for p in group["params"]}
+            new_params = [p for p in
                 list(model.encoder.block4.parameters()) +
-                list(model.encoder.block5.parameters()),
-                "lr": args.lr * 0.01})
-            print("  Unfroze encoder block4+5")
+                list(model.encoder.block5.parameters())
+                if id(p) not in existing]
+            for p in new_params:
+                p.requires_grad = True
+            if new_params:
+                opt.add_param_group({"params": new_params, "lr": args.lr * 0.01})
+            print(f"  Unfroze encoder block4+5 ({len(new_params)} new params)")
 
         model.train()
         tr_loss, tr_ious = 0.0, []
