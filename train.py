@@ -157,8 +157,9 @@ def train_task1(args):
         criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=run_epochs,
-            last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
+            optimizer, T_max=run_epochs)
+        for _ in range(start_epoch):
+            scheduler.step()
 
         for epoch in range(start_epoch + 1, run_epochs + 1):
             model.train()
@@ -278,9 +279,10 @@ def train_task2(args):
     huber_fn = nn.SmoothL1Loss()          # more robust than MSE for bbox regression
     params  = [p for p in model.parameters() if p.requires_grad]
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
-    sch     = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=args.epochs,
-        last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
+    # Always create scheduler fresh — fast-forward it to start_epoch by stepping
+    sch     = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    for _ in range(start_epoch):
+        sch.step()
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
         # Gradually unfreeze encoder: after epoch 10 unfreeze block3,
@@ -404,9 +406,9 @@ def train_task3_strategy(args, strategy):
     dice_fn = DiceLoss(num_classes=SEG_CLASSES)
     params  = [p for p in model.parameters() if p.requires_grad]
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
-    sch     = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=args.epochs,
-        last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
+    sch     = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    for _ in range(start_epoch):
+        sch.step()
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
         model.train()
