@@ -293,11 +293,9 @@ def train_task2(args):
         clf = VGG11Classifier()
         clf.load_state_dict(torch.load(clf_path, map_location="cpu")["state_dict"])
         model.encoder.load_state_dict(clf.encoder.state_dict())
-        for p in (list(model.encoder.block1.parameters()) +
-                  list(model.encoder.block2.parameters()) +
-                  list(model.encoder.block3.parameters())):
+        for p in model.encoder.parameters():
             p.requires_grad = False
-        print("  Encoder loaded + early blocks frozen.")
+        print("  Encoder loaded + ALL blocks frozen.")
 
     start_epoch, best_iou = load_ckpt_if_exists(model, periodic_path, device)
 
