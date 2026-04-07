@@ -84,7 +84,7 @@ class MultiTaskPerceptionModel(nn.Module):
             nn.Linear(1024, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 4),
-            nn.ReLU(),
+            nn.Sigmoid()  # Force smooth outputs strictly between [0, 1]
         )
 
         # ── Segmentation decoder ──
@@ -161,7 +161,8 @@ class MultiTaskPerceptionModel(nn.Module):
         cls_out = self.cls_head(torch.flatten(self.avgpool(e5), 1))
 
         # Localization — uses dedicated loc_encoder features
-        bbox_out = self.reg_head(self.reg_pool(e5_loc)).clamp(0, IMAGE_SIZE)
+        # Localization — cleanly scale the 0-1 sigmoid output to pixel space
+        bbox_out = self.reg_head(self.reg_pool(e5_loc)) * IMAGE_SIZE
 
         # Segmentation
         d5 = self.dec5(self._pad_cat(self.up5(e5), e4))

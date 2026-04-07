@@ -65,6 +65,31 @@ def dice_score(pred_mask, gt_mask, num_classes=3, eps=1e-6):
         scores.append(1.0 if denom < eps else ((2*inter+eps)/(denom+eps)).item())
     return float(np.mean(scores))
 
+import torch
+import torch.nn.functional as F
+
+def dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1e-5) -> torch.Tensor:
+    """
+    Calculates the Dice Loss for multi-class segmentation.
+    pred: [B, C, H, W] raw logits from the network
+    target: [B, H, W] integer class labels
+    """
+    # 1. Apply softmax to predictions to get probabilities
+    pred_softmax = F.softmax(pred, dim=1)
+    
+    # 2. Convert target to one-hot encoding [B, C, H, W]
+    # num_classes=3 because you have 3 trimap classes (Foreground, Background, Border)
+    target_one_hot = F.one_hot(target, num_classes=3).permute(0, 3, 1, 2).float()
+    
+    # 3. Calculate intersection and union over spatial dimensions (H, W)
+    intersection = (pred_softmax * target_one_hot).sum(dim=(2, 3))
+    union = pred_softmax.sum(dim=(2, 3)) + target_one_hot.sum(dim=(2, 3))
+    
+    # 4. Compute Dice score
+    dice_score = (2. * intersection + smooth) / (union + smooth)
+    
+    # 5. Return 1 - mean Dice score as the loss
+    return 1.0 - dice_score.mean()
 
 def pixel_acc(pred, gt):
     return (pred == gt).float().mean().item()
@@ -422,7 +447,7 @@ def train_task3_strategy(args, strategy):
             masks = batch["mask"].to(device)
             opt.zero_grad()
             logits = model(imgs)
-            loss   = 0.5 * ce_fn(logits, masks) + 0.5 * dice_fn(logits, masks)
+            loss   = 0.5 * ce_fn(logits, masks) + 0.5 * dice_loss(logits, masks)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -440,7 +465,7 @@ def train_task3_strategy(args, strategy):
                 masks = batch["mask"].to(device)
                 logits = model(imgs)
                 val_loss += (0.5*ce_fn(logits, masks) +
-                             0.5*dice_fn(logits, masks)).item() * imgs.size(0)
+                             0.5*dice_loss(logits, masks)).item() * imgs.size(0)
                 preds = logits.argmax(1)
                 val_dice.append(dice_score(preds.cpu(), masks.cpu()))
                 val_acc.append(pixel_acc(preds.cpu(),  masks.cpu()))
