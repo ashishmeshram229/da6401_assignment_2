@@ -46,6 +46,7 @@ class OxfordIIITPetDataset(Dataset):
     def __init__(self, root: str, split: str = "train", seed: int = 42):
         self.root = root
         self.split = split
+        self.require_bbox = require_bbox
         self.images_dir = os.path.join(root, "images")
         self.masks_dir  = os.path.join(root, "annotations", "trimaps")
         self.xmls_dir   = os.path.join(root, "annotations", "xmls")
@@ -75,6 +76,8 @@ class OxfordIIITPetDataset(Dataset):
 
                 # Pre-cache bbox so __getitem__ never re-parses XML
                 xml_path = os.path.join(self.xmls_dir, img_name + ".xml")
+                if self.require_bbox and not os.path.exists(xml_path):
+                    continue
                 cached_bbox = self._parse_bbox_from_xml(xml_path)
 
                 all_data.append({

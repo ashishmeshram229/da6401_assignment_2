@@ -31,8 +31,8 @@ def set_seed(seed=SEED):
 
 
 def get_loaders(data_root, batch_size=32, num_workers=2):
-    train_ds = OxfordIIITPetDataset(data_root, split="train", seed=SEED)
-    val_ds   = OxfordIIITPetDataset(data_root, split="val",   seed=SEED)
+    train_ds = OxfordIIITPetDataset(data_root, split="train", seed=SEED,require_bbox=require_bbox)
+    val_ds   = OxfordIIITPetDataset(data_root, split="val",   seed=SEED,require_bbox=require_bbox)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
@@ -277,7 +277,7 @@ def train_task1(args):
 def train_task2(args):
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_loader, val_loader = get_loaders(args.data_root, args.batch_size, args.num_workers)
+    train_loader, val_loader = get_loaders(args.data_root, args.batch_size, args.num_workers,require_bbox=True)
 
     ckpt_path     = os.path.join(args.ckpt_dir, "localizer.pth")
     periodic_path = os.path.join(args.ckpt_dir, "localizer_periodic.pth")
