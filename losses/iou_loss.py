@@ -22,31 +22,32 @@ class IoULoss(nn.Module):
         gt_x2 = target_boxes[:, 0] + target_boxes[:, 2] / 2.0
         gt_y2 = target_boxes[:, 1] + target_boxes[:, 3] / 2.0
 
-        # 1. Standard IoU
+        # Calculate standard intersection coordinates
         inter_x1 = torch.max(pred_x1, gt_x1)
         inter_y1 = torch.max(pred_y1, gt_y1)
         inter_x2 = torch.min(pred_x2, gt_x2)
         inter_y2 = torch.min(pred_y2, gt_y2)
 
-        inter_area = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
-        pred_area = (pred_x2 - pred_x1).clamp(min=0) * (pred_y2 - pred_y1).clamp(min=0)
-        gt_area   = (gt_x2 - gt_x1).clamp(min=0) * (gt_y2 - gt_y1).clamp(min=0)
-        
+        # CRITICAL: Clamp width and height to 0 BEFORE multiplying to prevent false positives
+        inter_w = torch.clamp(inter_x2 - inter_x1, min=0)
+        inter_h = torch.clamp(inter_y2 - inter_y1, min=0)
+        inter_area = inter_w * inter_h
+
+        # Calculate areas
+        pred_w = torch.clamp(pred_x2 - pred_x1, min=0)
+        pred_h = torch.clamp(pred_y2 - pred_y1, min=0)
+        pred_area = pred_w * pred_h
+
+        gt_w = torch.clamp(gt_x2 - gt_x1, min=0)
+        gt_h = torch.clamp(gt_y2 - gt_y1, min=0)
+        gt_area = gt_w * gt_h
+
+        # Compute standard IoU and Loss
         union_area = pred_area + gt_area - inter_area
         iou = inter_area / (union_area + self.eps)
-
-        # 2. Generalized IoU (GIoU) Addition
-        # Find the coordinates of the smallest enclosing box
-        enclose_x1 = torch.min(pred_x1, gt_x1)
-        enclose_y1 = torch.min(pred_y1, gt_y1)
-        enclose_x2 = torch.max(pred_x2, gt_x2)
-        enclose_y2 = torch.max(pred_y2, gt_y2)
-
-        enclose_area = (enclose_x2 - enclose_x1).clamp(min=0) * (enclose_y2 - enclose_y1).clamp(min=0)
-
-        # GIoU formula pushes boxes together even when there is zero overlap
-        giou = iou - (enclose_area - union_area) / (enclose_area + self.eps)
-        loss = 1.0 - giou
+        
+        # Standard IoU loss bounded strictly in [0, 1]
+        loss = 1.0 - iou
 
         if self.reduction == "mean":
             return loss.mean()
