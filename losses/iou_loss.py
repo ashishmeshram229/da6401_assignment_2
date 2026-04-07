@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 
-class GIoULoss(nn.Module):
+class IoULoss(nn.Module):
     def __init__(self, eps: float = 1e-6, reduction: str = "mean"):
-        super(GIoULoss, self).__init__()
+        super(IoULoss, self).__init__()
         if reduction not in {"none", "mean", "sum"}:
             raise ValueError(f"reduction must be 'none', 'mean', or 'sum', got '{reduction}'")
         self.eps = eps
