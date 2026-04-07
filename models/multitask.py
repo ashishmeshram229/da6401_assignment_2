@@ -1,5 +1,3 @@
-
-
 import os
 import torch
 import torch.nn as nn
@@ -15,6 +13,7 @@ CLASSIFIER_DRIVE_ID = "1SLOWbKYqKTLeIHkaXgYHj9So9bSTwkX5"
 LOCALIZER_DRIVE_ID  = "1UDJzBX8sERJA2_m6LcCgUdyfq0zM23xO"
 UNET_DRIVE_ID       = "1pF3fNWRJAo5k1Q-VJ5w2gm6MeZcKkEQD"
 # ──────────────────────────────────────────────────────────────
+
 
 def _double_conv(in_ch, out_ch):
     return nn.Sequential(
@@ -106,39 +105,30 @@ class MultiTaskPerceptionModel(nn.Module):
         from .localization import VGG11Localizer
         from .segmentation import VGG11UNet
 
-        # Step 1: load classifier head weights (cls_head only)
         if os.path.exists(clf_path):
             clf = VGG11Classifier()
             clf.load_state_dict(_load_state(clf_path, device))
+            self.encoder.load_state_dict(clf.encoder.state_dict())
             self.cls_head.load_state_dict(clf.classifier.state_dict())
-            print("Loaded classifier head weights.")
+            print("Loaded classifier weights.")
 
-        # Step 2: load localizer — encoder + reg_head
-        # MUST use localizer encoder because reg_head was trained with it
         if os.path.exists(loc_path):
             loc = VGG11Localizer()
             loc.load_state_dict(_load_state(loc_path, device))
-            # Load localizer encoder into shared encoder
-            self.encoder.load_state_dict(loc.encoder.state_dict())
-            # Remap reg_head keys: loc has Pool at [0], multitask starts at Flatten
-            # loc.reg_head: [0]=Pool [1]=Flatten [2]=Linear [3]=ReLU [4]=Drop [5]=Linear [6]=ReLU [7]=Linear [8]=ReLU
-            # self.reg_head:         [0]=Flatten  [1]=Linear [2]=ReLU [3]=Drop [4]=Linear [5]=ReLU [6]=Linear [7]=ReLU
-            src_sd = loc.reg_head.state_dict()
-            dst_sd = self.reg_head.state_dict()
-            loaded, skipped = 0, 0
+            # loc.reg_head[0] = AdaptiveAvgPool2d  (no weights)
+            # loc.reg_head[1:] shares structure with self.reg_head
+            # Remap keys: "1.weight" -> "0.weight" etc. (shift index by -1 to skip pool)
+            src_sd = loc.reg_head.state_dict()   # keys like "2.weight", "2.bias", "5.weight" ...
+            dst_sd = {}
             for k, v in src_sd.items():
-                parts   = k.split(".")
-                new_key = ".".join([str(int(parts[0]) - 1)] + parts[1:])
-                if new_key in dst_sd and dst_sd[new_key].shape == v.shape:
-                    dst_sd[new_key] = v
-                    loaded += 1
-                else:
-                    skipped += 1
-            self.reg_head.load_state_dict(dst_sd, strict=True)
-            if skipped == 0:
-                print(f"Loaded localizer weights. ({loaded} tensors, all shapes matched)")
-            else:
-                print(f"WARNING: {skipped} localizer tensors skipped (shape mismatch).")
+                parts = k.split(".")
+                old_idx = int(parts[0])
+                new_idx = old_idx - 1          # shift left by 1 (drop the pool at index 0)
+                dst_sd[".".join([str(new_idx)] + parts[1:])] = v
+            missing, unexpected = self.reg_head.load_state_dict(dst_sd, strict=False)
+            if missing:
+                print(f"  reg_head missing keys (expected for Flatten/ReLU/Sigmoid): {missing}")
+            print("Loaded localizer weights.")
 
         if os.path.exists(unet_path):
             seg = VGG11UNet()
