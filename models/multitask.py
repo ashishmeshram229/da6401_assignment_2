@@ -9,9 +9,9 @@ from .layers import CustomDropout
 IMAGE_SIZE = 224
 
 # ── PASTE YOUR DRIVE IDs HERE AFTER TRAINING ──────────────────
-CLASSIFIER_DRIVE_ID = "1SLOWbKYqKTLeIHkaXgYHj9So9bSTwkX5"
-LOCALIZER_DRIVE_ID  = "1UDJzBX8sERJA2_m6LcCgUdyfq0zM23xO"
-UNET_DRIVE_ID       = "1pF3fNWRJAo5k1Q-VJ5w2gm6MeZcKkEQD"
+CLASSIFIER_DRIVE_ID = "PASTE_CLASSIFIER_PTH_DRIVE_ID_HERE"
+LOCALIZER_DRIVE_ID  = "PASTE_LOCALIZER_PTH_DRIVE_ID_HERE"
+UNET_DRIVE_ID       = "PASTE_UNET_PTH_DRIVE_ID_HERE"
 # ──────────────────────────────────────────────────────────────
 
 
@@ -115,20 +115,29 @@ class MultiTaskPerceptionModel(nn.Module):
         if os.path.exists(loc_path):
             loc = VGG11Localizer()
             loc.load_state_dict(_load_state(loc_path, device))
-            # loc.reg_head[0] = AdaptiveAvgPool2d  (no weights)
-            # loc.reg_head[1:] shares structure with self.reg_head
-            # Remap keys: "1.weight" -> "0.weight" etc. (shift index by -1 to skip pool)
-            src_sd = loc.reg_head.state_dict()   # keys like "2.weight", "2.bias", "5.weight" ...
-            dst_sd = {}
+            # DO NOT overwrite encoder here — classifier encoder loaded above is better
+            # loc.reg_head: [0]=Pool [1]=Flatten [2]=Linear(25088,1024) [3]=ReLU
+            #               [4]=Dropout [5]=Linear(1024,256) [6]=ReLU [7]=Linear(256,4) [8]=ReLU
+            # self.reg_head:[0]=Flatten [1]=Linear(25088,1024) [2]=ReLU
+            #               [3]=Dropout [4]=Linear(1024,256)   [5]=ReLU [6]=Linear(256,4) [7]=ReLU
+            # Remap: shift index by -1 to skip pool at [0], check shapes match
+            src_sd  = loc.reg_head.state_dict()
+            dst_sd  = self.reg_head.state_dict()
+            loaded, skipped = 0, 0
             for k, v in src_sd.items():
-                parts = k.split(".")
-                old_idx = int(parts[0])
-                new_idx = old_idx - 1          # shift left by 1 (drop the pool at index 0)
-                dst_sd[".".join([str(new_idx)] + parts[1:])] = v
-            missing, unexpected = self.reg_head.load_state_dict(dst_sd, strict=False)
-            if missing:
-                print(f"  reg_head missing keys (expected for Flatten/ReLU/Sigmoid): {missing}")
-            print("Loaded localizer weights.")
+                parts   = k.split(".")
+                new_key = ".".join([str(int(parts[0]) - 1)] + parts[1:])
+                if new_key in dst_sd and dst_sd[new_key].shape == v.shape:
+                    dst_sd[new_key] = v
+                    loaded += 1
+                else:
+                    skipped += 1
+            self.reg_head.load_state_dict(dst_sd, strict=True)
+            if skipped == 0:
+                print(f"Loaded localizer weights. ({loaded} tensors, all shapes matched)")
+            else:
+                print(f"WARNING: {skipped} localizer tensors skipped (shape mismatch).")
+                print("  Ensure localizer.pth was trained with 7x7 pool (not 4x4).")
 
         if os.path.exists(unet_path):
             seg = VGG11UNet()
