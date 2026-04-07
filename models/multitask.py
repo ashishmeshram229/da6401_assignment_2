@@ -55,8 +55,12 @@ class MultiTaskPerceptionModel(nn.Module):
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # ── Shared backbone ──
+        # ── Shared backbone (classifier + segmentation) ──
         self.encoder = VGG11Encoder(in_channels=in_channels)
+
+        # ── Separate encoder for localization ──
+        # reg_head was trained with localizer's encoder — must use it at inference
+        self.loc_encoder = VGG11Encoder(in_channels=in_channels)
 
         # ── Classification head ──
         self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
@@ -115,19 +119,20 @@ class MultiTaskPerceptionModel(nn.Module):
         if os.path.exists(loc_path):
             loc = VGG11Localizer()
             loc.load_state_dict(_load_state(loc_path, device))
-            # loc.reg_head[0] = AdaptiveAvgPool2d  (no weights)
-            # loc.reg_head[1:] shares structure with self.reg_head
-            # Remap keys: "1.weight" -> "0.weight" etc. (shift index by -1 to skip pool)
-            src_sd = loc.reg_head.state_dict()   # keys like "2.weight", "2.bias", "5.weight" ...
+            # Load localizer encoder into dedicated loc_encoder
+            self.loc_encoder.load_state_dict(loc.encoder.state_dict())
+            # Remap reg_head keys: shift by -1 to skip pool at index 0
+            # loc.reg_head: [0]=Pool [1]=Flatten [2]=Linear [3]=ReLU [4]=Drop [5]=Linear [6]=ReLU [7]=Linear [8]=ReLU
+            # self.reg_head:         [0]=Flatten  [1]=Linear [2]=ReLU [3]=Drop [4]=Linear [5]=ReLU [6]=Linear [7]=ReLU
+            src_sd = loc.reg_head.state_dict()
             dst_sd = {}
             for k, v in src_sd.items():
                 parts = k.split(".")
-                old_idx = int(parts[0])
-                new_idx = old_idx - 1          # shift left by 1 (drop the pool at index 0)
-                dst_sd[".".join([str(new_idx)] + parts[1:])] = v
+                new_key = ".".join([str(int(parts[0]) - 1)] + parts[1:])
+                dst_sd[new_key] = v
             missing, unexpected = self.reg_head.load_state_dict(dst_sd, strict=False)
             if missing:
-                print(f"  reg_head missing keys (expected for Flatten/ReLU/Sigmoid): {missing}")
+                print(f"  reg_head missing keys: {missing}")
             print("Loaded localizer weights.")
 
         if os.path.exists(unet_path):
@@ -145,15 +150,18 @@ class MultiTaskPerceptionModel(nn.Module):
         return torch.cat([upsampled, skip], dim=1)
 
     def forward(self, x: torch.Tensor):
-        # Single forward pass through shared encoder
+        # Classification + segmentation encoder
         e5, feats = self.encoder(x, return_features=True)
         e1, e2, e3, e4 = feats["block1"], feats["block2"], feats["block3"], feats["block4"]
+
+        # Localization encoder (separate — trained with localizer)
+        e5_loc = self.loc_encoder(x, return_features=False)
 
         # Classification
         cls_out = self.cls_head(torch.flatten(self.avgpool(e5), 1))
 
-        # Localization — flatten before FC, scale to pixel space
-        bbox_out = self.reg_head(self.reg_pool(e5)).clamp(0, IMAGE_SIZE)
+        # Localization — uses dedicated loc_encoder features
+        bbox_out = self.reg_head(self.reg_pool(e5_loc)).clamp(0, IMAGE_SIZE)
 
         # Segmentation
         d5 = self.dec5(self._pad_cat(self.up5(e5), e4))
