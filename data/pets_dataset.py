@@ -43,7 +43,8 @@ def get_transforms(split):
 
 
 class OxfordIIITPetDataset(Dataset):
-    def __init__(self, root: str, split: str = "train", seed: int = 42):
+    # 1. Added require_bbox to the arguments and saved it to self
+    def __init__(self, root: str, split: str = "train", seed: int = 42, require_bbox: bool = False):
         self.root = root
         self.split = split
         self.require_bbox = require_bbox
@@ -76,8 +77,11 @@ class OxfordIIITPetDataset(Dataset):
 
                 # Pre-cache bbox so __getitem__ never re-parses XML
                 xml_path = os.path.join(self.xmls_dir, img_name + ".xml")
+                
+                # 2. FILTER MAGIC: Skip this image entirely if it has no XML and we require one
                 if self.require_bbox and not os.path.exists(xml_path):
                     continue
+
                 cached_bbox = self._parse_bbox_from_xml(xml_path)
 
                 all_data.append({
