@@ -30,9 +30,9 @@ def set_seed(seed=SEED):
     np.random.seed(seed)
 
 
-def get_loaders(data_root, batch_size=32, num_workers=2):
-    train_ds = OxfordIIITPetDataset(data_root, split="train", seed=SEED,require_bbox=require_bbox)
-    val_ds   = OxfordIIITPetDataset(data_root, split="val",   seed=SEED,require_bbox=require_bbox)
+def get_loaders(data_root, batch_size=32, num_workers=2, require_bbox=False):
+    train_ds = OxfordIIITPetDataset(data_root, split="train", seed=SEED, require_bbox=require_bbox)
+    val_ds   = OxfordIIITPetDataset(data_root, split="val",   seed=SEED, require_bbox=require_bbox)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
