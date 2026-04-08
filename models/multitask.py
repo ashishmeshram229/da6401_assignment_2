@@ -10,7 +10,7 @@ IMAGE_SIZE = 224
 
 # ── PASTE YOUR DRIVE IDs HERE AFTER TRAINING ──────────────────
 CLASSIFIER_DRIVE_ID = "1SLOWbKYqKTLeIHkaXgYHj9So9bSTwkX5"
-LOCALIZER_DRIVE_ID  = "1fP1HWRqEs7gMzNxGIFTrta3fUiNV8tHx"
+LOCALIZER_DRIVE_ID  = "1eABwg4_rE4Q9cMH-BNTZu_2IABJpfyoK"
 UNET_DRIVE_ID       = "1D6PqGsQMwxh6AgAdk_J-9Gq3ZwMfxazT"
 # ──────────────────────────────────────────────────────────────
 
