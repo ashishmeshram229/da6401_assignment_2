@@ -68,28 +68,39 @@ def dice_score(pred_mask, gt_mask, num_classes=3, eps=1e-6):
 import torch
 import torch.nn.functional as F
 
-def dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1e-5) -> torch.Tensor:
-    """
-    Calculates the Dice Loss for multi-class segmentation.
-    pred: [B, C, H, W] raw logits from the network
-    target: [B, H, W] integer class labels
-    """
-    # 1. Apply softmax to predictions to get probabilities
-    pred_softmax = F.softmax(pred, dim=1)
-    
-    # 2. Convert target to one-hot encoding [B, C, H, W]
-    # num_classes=3 because you have 3 trimap classes (Foreground, Background, Border)
-    target_one_hot = F.one_hot(target, num_classes=3).permute(0, 3, 1, 2).float()
-    
-    # 3. Calculate intersection and union over spatial dimensions (H, W)
-    intersection = (pred_softmax * target_one_hot).sum(dim=(2, 3))
-    union = pred_softmax.sum(dim=(2, 3)) + target_one_hot.sum(dim=(2, 3))
-    
-    # 4. Compute Dice score
-    dice_score = (2. * intersection + smooth) / (union + smooth)
-    
-    # 5. Return 1 - mean Dice score as the loss
-    return 1.0 - dice_score.mean()
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DiceLoss(nn.Module):
+    def __init__(self, smooth: float = 1e-6):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # logits: [B, C, H, W] (Raw, un-softmaxed outputs from the UNet)
+        # targets: [B, H, W] (Integer class labels: 0, 1, 2)
+        
+        num_classes = logits.size(1)
+        
+        # 1. Convert logits to probabilities
+        probs = F.softmax(logits, dim=1)
+        
+        # 2. One-hot encode the targets so they match the shape of probs [B, C, H, W]
+        targets_one_hot = F.one_hot(targets, num_classes=num_classes)
+        targets_one_hot = targets_one_hot.permute(0, 3, 1, 2).float()
+        
+        # 3. Calculate Intersection and Union (Cardinality) over the batch and spatial dims
+        # dims=(0, 2, 3) means we average over the batch size, height, and width, leaving just the classes
+        dims = (0, 2, 3)
+        intersection = torch.sum(probs * targets_one_hot, dim=dims)
+        cardinality = torch.sum(probs + targets_one_hot, dim=dims)
+        
+        # 4. Calculate Dice Score for each class, then take the mean
+        dice_score = (2.0 * intersection + self.smooth) / (cardinality + self.smooth)
+        
+        # Return loss (1 - dice)
+        return 1.0 - dice_score.mean()
 
 def pixel_acc(pred, gt):
     return (pred == gt).float().mean().item()
@@ -428,7 +439,7 @@ def train_task3_strategy(args, strategy):
     # Upweight foreground(1) and boundary(2) — background(0) is majority class
     seg_weights = torch.tensor([0.5, 1.5, 2.0]).to(device)
     ce_fn   = nn.CrossEntropyLoss(weight=seg_weights)
-    dice_fn = DiceLoss(num_classes=SEG_CLASSES)
+    dice_fn = DiceLoss()
     params  = [p for p in model.parameters() if p.requires_grad]
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
     for pg in opt.param_groups:
@@ -445,7 +456,7 @@ def train_task3_strategy(args, strategy):
             masks = batch["mask"].to(device)
             opt.zero_grad()
             logits = model(imgs)
-            loss   = 0.5 * ce_fn(logits, masks) + 0.5 * dice_loss(logits, masks)
+            loss   = 0.5 * ce_fn(logits, masks) + 0.5 * dice_fn(logits, masks)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -463,7 +474,7 @@ def train_task3_strategy(args, strategy):
                 masks = batch["mask"].to(device)
                 logits = model(imgs)
                 val_loss += (0.5*ce_fn(logits, masks) +
-                             0.5*dice_loss(logits, masks)).item() * imgs.size(0)
+                             0.5*dice_fn(logits, masks)).item() * imgs.size(0)
                 preds = logits.argmax(1)
                 val_dice.append(dice_score(preds.cpu(), masks.cpu()))
                 val_acc.append(pixel_acc(preds.cpu(),  masks.cpu()))

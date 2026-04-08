@@ -23,7 +23,7 @@ class VGG11Localizer(nn.Module):
             nn.Linear(1024, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 4),
-            nn.ReLU(),                          # keep outputs >= 0, no sigmoid saturation
+            nn.Sigmoid(),                       # <-- FIX 1: Smoothly bounds outputs to [0.0, 1.0]
         )
 
         for m in self.reg_head.modules():
@@ -33,6 +33,7 @@ class VGG11Localizer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         f5 = self.encoder(x, return_features=False)
-        # ReLU keeps values >= 0; clamp to valid pixel range at output
         out = self.reg_head(f5)
-        return out.clamp(0, IMAGE_SIZE)
+        
+        # <-- FIX 2: Multiply the [0.0, 1.0] sigmoid output by 224 to map to image space
+        return out * IMAGE_SIZE
