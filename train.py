@@ -30,9 +30,9 @@ def set_seed(seed=SEED):
     np.random.seed(seed)
 
 
-def get_loaders(data_root, batch_size=32, num_workers=2, require_bbox=False):
-    train_ds = OxfordIIITPetDataset(data_root, split="train", seed=SEED, require_bbox=require_bbox)
-    val_ds   = OxfordIIITPetDataset(data_root, split="val",   seed=SEED, require_bbox=require_bbox)
+def get_loaders(data_root, batch_size=32, num_workers=2):
+    train_ds = OxfordIIITPetDataset(data_root, split="train", seed=SEED)
+    val_ds   = OxfordIIITPetDataset(data_root, split="val",   seed=SEED)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True, drop_last=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
@@ -65,42 +65,6 @@ def dice_score(pred_mask, gt_mask, num_classes=3, eps=1e-6):
         scores.append(1.0 if denom < eps else ((2*inter+eps)/(denom+eps)).item())
     return float(np.mean(scores))
 
-import torch
-import torch.nn.functional as F
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class DiceLoss(nn.Module):
-    def __init__(self, smooth: float = 1e-6):
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # logits: [B, C, H, W] (Raw, un-softmaxed outputs from the UNet)
-        # targets: [B, H, W] (Integer class labels: 0, 1, 2)
-        
-        num_classes = logits.size(1)
-        
-        # 1. Convert logits to probabilities
-        probs = F.softmax(logits, dim=1)
-        
-        # 2. One-hot encode the targets so they match the shape of probs [B, C, H, W]
-        targets_one_hot = F.one_hot(targets, num_classes=num_classes)
-        targets_one_hot = targets_one_hot.permute(0, 3, 1, 2).float()
-        
-        # 3. Calculate Intersection and Union (Cardinality) over the batch and spatial dims
-        # dims=(0, 2, 3) means we average over the batch size, height, and width, leaving just the classes
-        dims = (0, 2, 3)
-        intersection = torch.sum(probs * targets_one_hot, dim=dims)
-        cardinality = torch.sum(probs + targets_one_hot, dim=dims)
-        
-        # 4. Calculate Dice Score for each class, then take the mean
-        dice_score = (2.0 * intersection + self.smooth) / (cardinality + self.smooth)
-        
-        # Return loss (1 - dice)
-        return 1.0 - dice_score.mean()
 
 def pixel_acc(pred, gt):
     return (pred == gt).float().mean().item()
@@ -288,7 +252,7 @@ def train_task1(args):
 def train_task2(args):
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_loader, val_loader = get_loaders(args.data_root, args.batch_size, args.num_workers,require_bbox=True)
+    train_loader, val_loader = get_loaders(args.data_root, args.batch_size, args.num_workers)
 
     ckpt_path     = os.path.join(args.ckpt_dir, "localizer.pth")
     periodic_path = os.path.join(args.ckpt_dir, "localizer_periodic.pth")
@@ -304,9 +268,11 @@ def train_task2(args):
         clf = VGG11Classifier()
         clf.load_state_dict(torch.load(clf_path, map_location="cpu")["state_dict"])
         model.encoder.load_state_dict(clf.encoder.state_dict())
-        for p in model.encoder.parameters():
+        for p in (list(model.encoder.block1.parameters()) +
+                  list(model.encoder.block2.parameters()) +
+                  list(model.encoder.block3.parameters())):
             p.requires_grad = False
-        print("  Encoder loaded + ALL blocks frozen.")
+        print("  Encoder loaded + early blocks frozen.")
 
     start_epoch, best_iou = load_ckpt_if_exists(model, periodic_path, device)
 
@@ -439,7 +405,7 @@ def train_task3_strategy(args, strategy):
     # Upweight foreground(1) and boundary(2) — background(0) is majority class
     seg_weights = torch.tensor([0.5, 1.5, 2.0]).to(device)
     ce_fn   = nn.CrossEntropyLoss(weight=seg_weights)
-    dice_fn = DiceLoss()
+    dice_fn = DiceLoss(num_classes=SEG_CLASSES)
     params  = [p for p in model.parameters() if p.requires_grad]
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
     for pg in opt.param_groups:
@@ -592,10 +558,9 @@ def run_report(args):
             imgs = batch["image"].to(device)
             gt   = batch["bbox"][0].numpy()
             with torch.no_grad():
-                raw  = model.reg_head(model.reg_pool(model.encoder(imgs))) # [0,1] before *IMAGE_SIZE
-                pred = (raw * IMAGE_SIZE)[0].cpu().numpy()
-                # Confidence proxy: mean sigmoid output value (how "committed" the network is)
-                conf = float(raw.mean().cpu())
+                pred = model(imgs)[0].cpu().numpy()   # already in pixel space [0, 224]
+                # Confidence proxy: how far output is from centre of image
+                conf = float(1.0 - abs(pred[2] - IMAGE_SIZE/2) / IMAGE_SIZE)
             iou    = compute_iou_np(pred[None], gt[None])[0]
             verdict = "✅ Good" if iou >= 0.5 else ("⚠️ Miss" if iou >= 0.2 else "❌ Fail")
             img_np = (batch["image"][0].numpy().transpose(1,2,0)
