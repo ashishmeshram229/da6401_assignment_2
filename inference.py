@@ -1,26 +1,213 @@
-import torch
-from models.multitask import MultiTaskPerceptionModel
+"""
+inference.py - Content Moderation OpenEnv Baseline Agent
+MANDATORY VARIABLES: API_BASE_URL, MODEL_NAME, API_KEY (injected by validator)
+"""
+import json
+import os
+import textwrap
+import time
+import urllib.request
+from typing import List
 
+# ---------------------------------------------------------------------------
+# Config — use exact variable names the validator injects
+# ---------------------------------------------------------------------------
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN") or "hf_placeholder"
+MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
+ENV_URL      = os.environ.get("ENV_BASE_URL", "https://heist-content-mod-openenv.hf.space")
+TEMPERATURE  = 0.0
+MAX_TOKENS   = 512
+TASKS        = ["easy", "medium", "hard"]
 
-def run_inference(image_tensor,
-                  classifier_path="checkpoints/classifier.pth",
-                  localizer_path="checkpoints/localizer.pth",
-                  unet_path="checkpoints/unet.pth"):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MultiTaskPerceptionModel(
-        classifier_path=classifier_path,
-        localizer_path=localizer_path,
-        unet_path=unet_path,
-    ).to(device)
-    model.eval()
-    with torch.no_grad():
-        cls_out, bbox_out, seg_out = model(image_tensor.to(device))
-    return cls_out, bbox_out, seg_out
+# ---------------------------------------------------------------------------
+# Structured output — required by Phase 2 validator
+# ---------------------------------------------------------------------------
+def log_start(task):
+    print(f"[START] task={task}", flush=True)
+
+def log_step(task, step, reward, done):
+    print(f"[STEP] task={task} step={step} reward={reward:.4f} done={done}", flush=True)
+
+def log_end(task, score, steps):
+    print(f"[END] task={task} score={score:.4f} steps={steps}", flush=True)
+
+# ---------------------------------------------------------------------------
+# OpenAI client — uses validator-injected API_BASE_URL and API_KEY
+# ---------------------------------------------------------------------------
+from openai import OpenAI
+
+client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+# ---------------------------------------------------------------------------
+# Env HTTP helpers
+# ---------------------------------------------------------------------------
+def _post(path, body):
+    data = json.dumps(body).encode()
+    req  = urllib.request.Request(
+        ENV_URL.rstrip("/") + path, data=data,
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read())
+
+def _get(path):
+    with urllib.request.urlopen(ENV_URL.rstrip("/") + path, timeout=30) as r:
+        return json.loads(r.read())
+
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+SYSTEM = textwrap.dedent("""
+You are an expert content moderator. Respond with ONLY valid JSON:
+{
+  "content_id": "<id>",
+  "decision": "<approve|remove|escalate|warn_user|age_restrict|shadow_ban>",
+  "violation_category": "<hate_speech|harassment|misinformation|spam|explicit_content|violence|self_harm|none>",
+  "severity_assessment": "<low|medium|high|critical>",
+  "confidence": <0.0-1.0>,
+  "reasoning": "<brief>",
+  "policy_rule_cited": null
+}
+Rules: approve=fine, remove=clear violation, escalate=ambiguous,
+warn_user=borderline, age_restrict=adult legal, shadow_ban=spam.
+Self-harm ALWAYS needs action. No markdown, JSON only.
+""").strip()
+
+def build_prompt(obs):
+    c = obs.get("content", {})
+    u = obs.get("user_context", {})
+    rules = "\n".join(
+        f"  [{r['rule_id']}] {r['description']}"
+        for r in obs.get("applicable_rules", []))
+    return (f"content_id: {c.get('content_id')}\n"
+            f"text: {c.get('text','')}\n"
+            f"reported: {c.get('reported_count')} views: {c.get('view_count')}\n"
+            f"user_reputation: {u.get('reputation')} "
+            f"prior_violations: {u.get('prior_violations',0)} "
+            f"verified: {u.get('is_verified',False)}\n"
+            f"queue: {obs.get('queue_position')}/{obs.get('queue_total')}\n"
+            f"rules:\n{rules}\nJSON only.")
+
+def call_llm(prompt):
+    try:
+        r = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "system", "content": SYSTEM},
+                      {"role": "user",   "content": prompt}],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS)
+        return r.choices[0].message.content or ""
+    except Exception as e:
+        print(f"  [LLM ERROR] {e}", flush=True)
+        return ""
+
+def parse_action(text, content_id):
+    try:
+        t = text.strip()
+        if t.startswith("```"):
+            lines = t.split("\n")
+            t = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+        p = json.loads(t)
+        p["content_id"] = content_id
+        p.setdefault("reasoning", "")
+        p.setdefault("policy_rule_cited", None)
+        p.setdefault("escalation_note", None)
+        p["confidence"] = float(max(0.0, min(1.0, p.get("confidence", 0.5))))
+        return p
+    except Exception:
+        return {"content_id": content_id, "decision": "escalate",
+                "violation_category": "none", "severity_assessment": "medium",
+                "confidence": 0.1, "reasoning": "fallback",
+                "policy_rule_cited": None, "escalation_note": None}
+
+# ---------------------------------------------------------------------------
+# Run one task
+# ---------------------------------------------------------------------------
+def run_task(task_name):
+    log_start(task_name)
+    try:
+        obs = _post("/reset", {"task": task_name})
+    except Exception as e:
+        print(f"  [ERROR] reset failed: {e}", flush=True)
+        log_end(task_name, 0.0, 0)
+        return {"task": task_name, "final_score": 0.0, "accuracy": 0.0,
+                "correct": 0, "total": 0, "error": str(e)}
+
+    total_reward = 0.0
+    step = 0
+    episode_result = {}
+
+    while True:
+        try:
+            cid    = obs["content"]["content_id"]
+            action = parse_action(call_llm(build_prompt(obs)), cid)
+            result = _post("/step", {"action": action})
+            obs    = result["observation"]
+            reward = float(result["reward"])
+            done   = bool(result["done"])
+            total_reward += reward
+            step += 1
+            log_step(task_name, step, reward, done)
+            if done:
+                episode_result = result["info"].get("episode_result", {})
+                break
+        except Exception as e:
+            print(f"  [ERROR] step {step}: {e}", flush=True)
+            break
+
+    score = float(episode_result.get("final_score", 0.0))
+    log_end(task_name, score, step)
+    return {"task": task_name, "final_score": score,
+            "accuracy": episode_result.get("accuracy", 0.0),
+            "correct":  episode_result.get("correct_decisions", 0),
+            "total":    episode_result.get("total_items", 0),
+            "total_reward": round(total_reward, 4),
+            "episode_result": episode_result}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    print(f"[INFO] Content Moderation OpenEnv — Baseline Agent", flush=True)
+    print(f"[INFO] ENV={ENV_URL}", flush=True)
+    print(f"[INFO] API_BASE_URL={API_BASE_URL}", flush=True)
+    print(f"[INFO] MODEL={MODEL_NAME}", flush=True)
+    print(f"[INFO] API_KEY={'set' if API_KEY != 'hf_placeholder' else 'NOT SET'}", flush=True)
+
+    try:
+        h = _get("/health")
+        print(f"[INFO] Env health: {h.get('status','unknown')}", flush=True)
+    except Exception as e:
+        print(f"[WARNING] Env health: {e}", flush=True)
+
+    results = []
+    t0 = time.time()
+
+    for task in TASKS:
+        try:
+            results.append(run_task(task))
+        except Exception as e:
+            print(f"[ERROR] Task {task}: {e}", flush=True)
+            log_start(task)
+            log_end(task, 0.0, 0)
+            results.append({"task": task, "final_score": 0.0,
+                            "accuracy": 0.0, "correct": 0, "total": 0})
+
+    elapsed = time.time() - t0
+    avg = sum(r.get("final_score", 0) for r in results) / len(results)
+
+    print(f"[SUMMARY] avg_score={avg:.4f} runtime={elapsed:.1f}s", flush=True)
+    for r in results:
+        print(f"[RESULT] task={r['task']} score={r.get('final_score',0):.4f} "
+              f"accuracy={r.get('accuracy',0):.4f} "
+              f"correct={r.get('correct',0)}/{r.get('total',0)}", flush=True)
+
+    output = {"model": MODEL_NAME, "results": results,
+              "avg_score": round(avg, 4), "runtime_sec": round(elapsed, 1)}
+    with open("baseline_results.json", "w") as f:
+        json.dump(output, f, indent=2, default=str)
+    print("[INFO] Saved baseline_results.json", flush=True)
 
 
 if __name__ == "__main__":
-    x = torch.randn(1, 3, 224, 224)
-    cls_out, bbox_out, seg_out = run_inference(x)
-    print("classification:", cls_out.shape)   # [1, 37]
-    print("localization:  ", bbox_out.shape)  # [1, 4]
-    print("segmentation:  ", seg_out.shape)   # [1, 3, 224, 224]
+    main()
