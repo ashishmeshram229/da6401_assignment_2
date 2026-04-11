@@ -1,19 +1,22 @@
 """
 inference.py - Content Moderation OpenEnv Baseline Agent
-MANDATORY VARIABLES: API_BASE_URL, MODEL_NAME, API_KEY (injected by validator)
+MANDATORY VARIABLES (injected by validator):
+    API_BASE_URL  - LiteLLM proxy endpoint
+    API_KEY       - Validator API key
+    MODEL_NAME    - Model to use
 """
 import json
 import os
 import textwrap
 import time
 import urllib.request
-from typing import List
+from openai import OpenAI
 
 # ---------------------------------------------------------------------------
-# Config — use exact variable names the validator injects
+# Config — use EXACTLY the env vars the validator injects
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN") or "hf_placeholder"
+API_BASE_URL = os.environ["API_BASE_URL"]
+API_KEY      = os.environ["API_KEY"]
 MODEL_NAME   = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 ENV_URL      = os.environ.get("ENV_BASE_URL", "https://heist-content-mod-openenv.hf.space")
 TEMPERATURE  = 0.0
@@ -21,7 +24,12 @@ MAX_TOKENS   = 512
 TASKS        = ["easy", "medium", "hard"]
 
 # ---------------------------------------------------------------------------
-# Structured output — required by Phase 2 validator
+# OpenAI client using validator-injected credentials
+# ---------------------------------------------------------------------------
+client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+# ---------------------------------------------------------------------------
+# Structured output blocks — required by Phase 2 validator
 # ---------------------------------------------------------------------------
 def log_start(task):
     print(f"[START] task={task}", flush=True)
@@ -31,13 +39,6 @@ def log_step(task, step, reward, done):
 
 def log_end(task, score, steps):
     print(f"[END] task={task} score={score:.4f} steps={steps}", flush=True)
-
-# ---------------------------------------------------------------------------
-# OpenAI client — uses validator-injected API_BASE_URL and API_KEY
-# ---------------------------------------------------------------------------
-from openai import OpenAI
-
-client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
 # ---------------------------------------------------------------------------
 # Env HTTP helpers
@@ -82,24 +83,21 @@ def build_prompt(obs):
     return (f"content_id: {c.get('content_id')}\n"
             f"text: {c.get('text','')}\n"
             f"reported: {c.get('reported_count')} views: {c.get('view_count')}\n"
-            f"user_reputation: {u.get('reputation')} "
-            f"prior_violations: {u.get('prior_violations',0)} "
+            f"reputation: {u.get('reputation')} "
+            f"violations: {u.get('prior_violations',0)} "
             f"verified: {u.get('is_verified',False)}\n"
             f"queue: {obs.get('queue_position')}/{obs.get('queue_total')}\n"
             f"rules:\n{rules}\nJSON only.")
 
 def call_llm(prompt):
-    try:
-        r = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "system", "content": SYSTEM},
-                      {"role": "user",   "content": prompt}],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS)
-        return r.choices[0].message.content or ""
-    except Exception as e:
-        print(f"  [LLM ERROR] {e}", flush=True)
-        return ""
+    """Call LLM through validator proxy — raises on failure so we know."""
+    r = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "system", "content": SYSTEM},
+                  {"role": "user",   "content": prompt}],
+        temperature=TEMPERATURE,
+        max_tokens=MAX_TOKENS)
+    return r.choices[0].message.content or ""
 
 def parse_action(text, content_id):
     try:
@@ -117,7 +115,7 @@ def parse_action(text, content_id):
     except Exception:
         return {"content_id": content_id, "decision": "escalate",
                 "violation_category": "none", "severity_assessment": "medium",
-                "confidence": 0.1, "reasoning": "fallback",
+                "confidence": 0.1, "reasoning": "parse error fallback",
                 "policy_rule_cited": None, "escalation_note": None}
 
 # ---------------------------------------------------------------------------
@@ -125,34 +123,24 @@ def parse_action(text, content_id):
 # ---------------------------------------------------------------------------
 def run_task(task_name):
     log_start(task_name)
-    try:
-        obs = _post("/reset", {"task": task_name})
-    except Exception as e:
-        print(f"  [ERROR] reset failed: {e}", flush=True)
-        log_end(task_name, 0.0, 0)
-        return {"task": task_name, "final_score": 0.0, "accuracy": 0.0,
-                "correct": 0, "total": 0, "error": str(e)}
-
+    obs = _post("/reset", {"task": task_name})
     total_reward = 0.0
     step = 0
     episode_result = {}
 
     while True:
-        try:
-            cid    = obs["content"]["content_id"]
-            action = parse_action(call_llm(build_prompt(obs)), cid)
-            result = _post("/step", {"action": action})
-            obs    = result["observation"]
-            reward = float(result["reward"])
-            done   = bool(result["done"])
-            total_reward += reward
-            step += 1
-            log_step(task_name, step, reward, done)
-            if done:
-                episode_result = result["info"].get("episode_result", {})
-                break
-        except Exception as e:
-            print(f"  [ERROR] step {step}: {e}", flush=True)
+        cid    = obs["content"]["content_id"]
+        text   = call_llm(build_prompt(obs))
+        action = parse_action(text, cid)
+        result = _post("/step", {"action": action})
+        obs    = result["observation"]
+        reward = float(result["reward"])
+        done   = bool(result["done"])
+        total_reward += reward
+        step += 1
+        log_step(task_name, step, reward, done)
+        if done:
+            episode_result = result["info"].get("episode_result", {})
             break
 
     score = float(episode_result.get("final_score", 0.0))
@@ -169,10 +157,9 @@ def run_task(task_name):
 # ---------------------------------------------------------------------------
 def main():
     print(f"[INFO] Content Moderation OpenEnv — Baseline Agent", flush=True)
-    print(f"[INFO] ENV={ENV_URL}", flush=True)
     print(f"[INFO] API_BASE_URL={API_BASE_URL}", flush=True)
     print(f"[INFO] MODEL={MODEL_NAME}", flush=True)
-    print(f"[INFO] API_KEY={'set' if API_KEY != 'hf_placeholder' else 'NOT SET'}", flush=True)
+    print(f"[INFO] ENV={ENV_URL}", flush=True)
 
     try:
         h = _get("/health")
@@ -184,14 +171,8 @@ def main():
     t0 = time.time()
 
     for task in TASKS:
-        try:
-            results.append(run_task(task))
-        except Exception as e:
-            print(f"[ERROR] Task {task}: {e}", flush=True)
-            log_start(task)
-            log_end(task, 0.0, 0)
-            results.append({"task": task, "final_score": 0.0,
-                            "accuracy": 0.0, "correct": 0, "total": 0})
+        result = run_task(task)
+        results.append(result)
 
     elapsed = time.time() - t0
     avg = sum(r.get("final_score", 0) for r in results) / len(results)
