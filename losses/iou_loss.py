@@ -11,7 +11,7 @@ class IoULoss(nn.Module):
 
     def forward(self, pred_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
         # Both tensors expected to be: [B, 4] in (cx, cy, w, h) format
-        # pred_boxes: predicted bounding boxes
+        
         # 1. Convert (cx, cy, w, h) to (x1, y1, x2, y2)
         pred_x1 = pred_boxes[:, 0] - pred_boxes[:, 2] / 2.0
         pred_y1 = pred_boxes[:, 1] - pred_boxes[:, 3] / 2.0
@@ -25,7 +25,8 @@ class IoULoss(nn.Module):
 
         # 2. Calculate Standard IoU
         inter_x1 = torch.max(pred_x1, gt_x1)
-        inter_y1 = torch.max(pred_y1, gt_y1) # Max of top-left corners
+        inter_y1 = torch.max(pred_y1, gt_y1)
+        inter_x2 = torch.min(pred_x2, gt_x2)
         inter_y2 = torch.min(pred_y2, gt_y2)
 
         # Clamp width and height to 0 to avoid false positive intersections
@@ -33,12 +34,12 @@ class IoULoss(nn.Module):
         inter_h = torch.clamp(inter_y2 - inter_y1, min=0)
         inter_area = inter_w * inter_h
 
-        pred_w = torch.clamp(pred_x2 - pred_x1, min=0) # Clamp to 0 to avoid negative widths
+        pred_w = torch.clamp(pred_x2 - pred_x1, min=0)
         pred_h = torch.clamp(pred_y2 - pred_y1, min=0)
         pred_area = pred_w * pred_h
 
         gt_w = torch.clamp(gt_x2 - gt_x1, min=0)
-        gt_h = torch.clamp(gt_y2 - gt_y1, min=0) # Clamp to 0 to avoid negative widths
+        gt_h = torch.clamp(gt_y2 - gt_y1, min=0)
         gt_area = gt_w * gt_h
         
         union_area = pred_area + gt_area - inter_area
@@ -49,9 +50,6 @@ class IoULoss(nn.Module):
 
         if self.reduction == "mean":
             return loss.mean()
-        
-
-        
-        elif self.reduction == "sum": # Sum reduction
+        elif self.reduction == "sum":
             return loss.sum()
         return loss
