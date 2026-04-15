@@ -23,7 +23,7 @@ class VGG11Localizer(nn.Module):
             nn.Linear(1024, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 4),
-            nn.Sigmoid(),                       # <-- FIX 1: Smoothly bounds outputs to [0.0, 1.0]
+            nn.Sigmoid(),                   
         )
 
         for m in self.reg_head.modules():

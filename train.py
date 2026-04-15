@@ -106,9 +106,9 @@ class DiceLoss(nn.Module):
         return loss / self.num_classes
 
 
-# ─────────────────────────────────────────────────────────────
+
 # TASK 1 — Classification
-# ─────────────────────────────────────────────────────────────
+
 
 def train_task1(args):
     set_seed()
@@ -188,7 +188,7 @@ def train_task1(args):
             tr_f1  = macro_f1(tr_preds,  tr_labels)
             val_f1 = macro_f1(val_preds, val_labels)
             n_tr   = len(train_loader.dataset)
-            n_val  = len(val_loader.dataset)
+            n_val  = len(val_loader.dataset) # Number of samples in validation set
 
             wandb.log({"epoch":      epoch,
                        "train/loss": tr_loss  / n_tr,
@@ -215,18 +215,18 @@ def train_task1(args):
         wandb.finish()
 
     if best_overall_ckpt:
-        shutil.copy(best_overall_ckpt,
-                    os.path.join(args.ckpt_dir, "classifier.pth"))
+        shutil.copy(best_overall_ckpt, #
+                    os.path.join(args.ckpt_dir, "classifier.pth")) # Save the best overall checkpoint as "classifier.pth" for later tasks
     print(f"\nTask1 done. Best F1={best_overall_f1:.4f} -> classifier.pth saved")
 
 
-# ─────────────────────────────────────────────────────────────
+
 # TASK 2 — Localization
-# ─────────────────────────────────────────────────────────────
+
 
 def train_task2(args):
     set_seed()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Get device (GPU if available, else CPU)
     train_loader, val_loader = get_loaders(args.data_root, args.batch_size, args.num_workers)
 
     ckpt_path     = os.path.join(args.ckpt_dir, "localizer.pth")
@@ -239,7 +239,7 @@ def train_task2(args):
     model = VGG11Localizer().to(device)
 
     clf_path = os.path.join(args.ckpt_dir, "classifier.pth")
-    if os.path.exists(clf_path):
+    if os.path.exists(clf_path): # If classifier checkpoint exists, load encoder weights and freeze early blocks
         clf = VGG11Classifier()
         clf.load_state_dict(torch.load(clf_path, map_location="cpu")["state_dict"])
         model.encoder.load_state_dict(clf.encoder.state_dict())
@@ -257,7 +257,7 @@ def train_task2(args):
     opt     = torch.optim.Adam(params, lr=args.lr, weight_decay=1e-4)
     sch     = torch.optim.lr_scheduler.StepLR(
         opt, step_size=10, gamma=0.5,
-        last_epoch=start_epoch - 1 if start_epoch > 0 else -1)
+        last_epoch=start_epoch - 1 if start_epoch > 0 else -1) # StepLR with decay every 10 epochs
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
         model.train()
@@ -269,7 +269,7 @@ def train_task2(args):
             opt.zero_grad()
             pred = model(imgs)
             loss = mse_fn(pred, bboxes) + iou_fn(pred, bboxes)
-            loss.backward()
+            loss.backward() # Backpropagation
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             tr_loss += loss.item() * imgs.size(0)
@@ -280,7 +280,7 @@ def train_task2(args):
         sch.step()
 
         model.eval()
-        val_loss, val_ious = 0.0, []
+        val_loss, val_ious = 0.0, [] # Will store IoUs for each sample in validation set    
         with torch.no_grad():
             for batch in val_loader:
                 imgs   = batch["image"].to(device)
@@ -291,7 +291,7 @@ def train_task2(args):
                 val_ious.extend(compute_iou_np(
                     pred.cpu().numpy(), bboxes.cpu().numpy()).tolist())
 
-        miou  = float(np.mean(val_ious))
+        miou  = float(np.mean(val_ious)) # Mean IoU over validation set
         n_tr  = len(train_loader.dataset)
         n_val = len(val_loader.dataset)
 
@@ -309,7 +309,7 @@ def train_task2(args):
             print(f"    -> Best saved ({miou:.4f})")
 
         if epoch % 5 == 0:
-            save_ckpt(model, epoch, best_iou, periodic_path)
+            save_ckpt(model, epoch, best_iou, periodic_path) # Save periodic ckpt every 5 epochs
             print(f"    -> Periodic ckpt saved (epoch {epoch})")
 
     wandb.summary["best_val_iou"] = best_iou
@@ -317,9 +317,9 @@ def train_task2(args):
     print(f"\nTask2 done. Best IoU={best_iou:.4f} -> localizer.pth saved")
 
 
-# ─────────────────────────────────────────────────────────────
+
 # TASK 3 — Segmentation
-# ─────────────────────────────────────────────────────────────
+
 
 def train_task3_strategy(args, strategy):
     set_seed()
@@ -339,7 +339,7 @@ def train_task3_strategy(args, strategy):
     clf_path = os.path.join(args.ckpt_dir, "classifier.pth")
     if os.path.exists(clf_path):
         clf = VGG11Classifier()
-        clf.load_state_dict(torch.load(clf_path, map_location="cpu")["state_dict"])
+        clf.load_state_dict(torch.load(clf_path, map_location="cpu")["state_dict"]) # Load on CPU to avoid GPU memory issues
         model.encoder.load_state_dict(clf.encoder.state_dict())
         print(f"  [{strategy}] Encoder loaded.")
 
@@ -351,7 +351,7 @@ def train_task3_strategy(args, strategy):
                   list(model.encoder.block2.parameters()) +
                   list(model.encoder.block3.parameters())):
             p.requires_grad = False
-
+# For "full", all parameters are trainable by default
     start_epoch, best_dice = load_ckpt_if_exists(model, periodic_path, device)
 
     ce_fn   = nn.CrossEntropyLoss()
