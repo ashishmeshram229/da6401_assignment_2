@@ -2,7 +2,7 @@
 
 **Course:** DA6401 Introduction to Deep Learning  
 **Institute:** IIT Madras  
-**Author:** Ashish Meshram (ashishmeshram229)
+**Author:** Ashish Meshram (DA25M016)
 
 ---
 
